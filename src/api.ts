@@ -48,3 +48,56 @@ export function gitCloneUrl(
 ): string {
   return `${serverUrl.replace(/\/$/, "")}/api/v1/blog/git/${repoName}.git`;
 }
+
+interface TokenResp<T> {
+  code: number;
+  msg: string;
+  data: T | null;
+}
+
+/** 通用请求：带 Bearer，POST/PUT/DELETE 走 json body；解包 ApiResp 直接返回 data。 */
+async function authed<T>(
+  serverUrl: string,
+  token: string,
+  path: string,
+  init: { method?: string; body?: unknown } = {}
+): Promise<T> {
+  const res = await fetch(`${serverUrl.replace(/\/$/, "")}${path}`, {
+    method: init.method ?? "GET",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+  });
+  const body = (await res.json().catch(() => null)) as TokenResp<T> | null;
+  if (!res.ok || !body || body.code !== 0) {
+    throw new Error(body?.msg || `HTTP ${res.status}`);
+  }
+  return body.data as T;
+}
+
+export async function createSeries(
+  serverUrl: string,
+  token: string,
+  input: { title: string; repo_name: string }
+): Promise<BlogSeries> {
+  return authed<BlogSeries>(serverUrl, token, "/api/v1/blog/series", {
+    method: "POST",
+    body: input,
+  });
+}
+
+export async function deleteSeries(serverUrl: string, token: string, id: number): Promise<void> {
+  await authed<unknown>(serverUrl, token, `/api/v1/blog/series/${id}`, { method: "DELETE" });
+}
+
+export async function toggleStar(
+  serverUrl: string,
+  token: string,
+  id: number
+): Promise<{ starred: boolean }> {
+  return authed<{ starred: boolean }>(serverUrl, token, `/api/v1/blog/series/${id}/star`, {
+    method: "POST",
+  });
+}

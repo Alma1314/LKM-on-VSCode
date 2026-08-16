@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { serverUrlFromConfig, runCloneFlow, CloneDeps } from "../src/clone";
+import { serverUrlFromConfig, runCloneFlow, CloneDeps, runCloneForAccount } from "../src/clone";
+import { AccountMeta } from "../src/accounts";
+import { saveCredentialsForAccount } from "../src/creds";
 import { listSeries, BlogSeries } from "../src/api";
 import { __inputBoxQueue } from "./mocks/vscode";
 
@@ -142,5 +144,68 @@ describe("clone", () => {
 
   it("serverUrlFromConfig 空配置抛错", () => {
     expect(() => serverUrlFromConfig(() => "")).toThrow();
+  });
+});
+
+describe("clone (按账号)", () => {
+  const account: AccountMeta = {
+    key: "https://h:alice",
+    serverUrl: "https://h",
+    username: "alice",
+    series: {},
+  };
+
+  function deps(over: Partial<CloneDeps> = {}): CloneDeps {
+    return {
+      getConfig: (k) => (k === "lkm.serverUrl" ? "https://h" : ""),
+      pickSeries: async () => ({ id: 1, title: "我的博客", repo_name: "my-blog", status: "ACTIVE" }),
+      pickTargetDir: async () => "C:/x/my-blog",
+      doClone: async () => {},
+      ...over,
+    };
+  }
+
+  beforeEach(() => {
+    // 顶层 vi.mock 已用 vi.fn 替换 listSeries，默认返回 undefined；
+    // 本组用例需要有效的系列列表，统一复位为单条。
+    (listSeries as unknown as ReturnType<typeof vi.fn>).mockReset();
+    (listSeries as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 1, title: "我的博客", repo_name: "my-blog", status: "ACTIVE" },
+    ]);
+  });
+
+  it("用账号凭证 clone 并返回映射信息", async () => {
+    const store: Record<string, string> = {};
+    const ctx = {
+      secrets: {
+        get: async (k: string) => store[k] ?? undefined,
+        store: async (k: string, v: string) => { store[k] = v; },
+        delete: async () => {},
+      },
+    } as never;
+    // 预置该账号密码到 SecretStorage（key 为账号 key 的 base64）
+    await saveCredentialsForAccount(ctx, account.key, "alice", "secretpw");
+    const doClone = vi.fn().mockResolvedValue(undefined);
+
+    const out = await runCloneForAccount(ctx, account, deps({ doClone }));
+    expect(out.kind).toBe("cloned");
+    if (out.kind === "cloned") {
+      expect(out.series.repo_name).toBe("my-blog");
+      expect(out.series.dir).toBe("C:/x/my-blog");
+      // 核心交付：新系列已写回账号映射，目录即目标目录
+      expect(out.account.series["my-blog"]).toBe("C:/x/my-blog");
+      expect(doClone).toHaveBeenCalledOnce();
+      const url = doClone.mock.calls[0][0] as string;
+      expect(url).toContain("/api/v1/blog/git/my-blog.git");
+      expect(url.startsWith("https://alice:secretpw@h/")).toBe(true);
+    }
+  });
+
+  it("无凭证时提示录入，取消则 cancelled", async () => {
+    const store: Record<string, string> = {};
+    const ctx = { secrets: { get: async () => undefined, store: async () => {}, delete: async () => {} } } as never;
+    const out = await runCloneForAccount(ctx, account, deps({ doClone: async () => {} }));
+    expect(out.kind).toBe("cancelled");
+    expect(store).not.toHaveProperty("__never"); // secret 无残留
   });
 });

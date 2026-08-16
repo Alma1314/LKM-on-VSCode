@@ -1,5 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { basicHeader, getCredentials, saveCredentials, clearCredentials, promptForCredentials } from "../src/creds";
+import {
+  basicHeader,
+  getCredentials,
+  saveCredentials,
+  clearCredentials,
+  promptForCredentials,
+  getCredentialsForAccount,
+  saveCredentialsForAccount,
+  clearCredentialsForAccount,
+  promptCredentialsForAccount,
+} from "../src/creds";
 import { __inputBoxQueue } from "./mocks/vscode";
 
 /**
@@ -107,6 +117,38 @@ describe("creds", () => {
       expect(res).toEqual({ username: "alice", password: "s3cret" });
       expect(ctx.secrets.store).toHaveBeenCalled();
       expect(await getCredentials(ctx)).toEqual({ username: "alice", password: "s3cret" });
+    });
+
+    it("promptCredentialsForAccount 只收密码，存后返回 user:pass", async () => {
+      const ctx: any = makeContext();
+      __inputBoxQueue.push("secretpw");
+      const got = await promptCredentialsForAccount(ctx, "https://h", "alice");
+      // 只收集密码，用户名来自参数，存到 accountKey("https://h","alice")
+      expect(got).toEqual({ username: "alice", password: "secretpw" });
+      expect(await getCredentialsForAccount(ctx, "https://h:alice")).toEqual({ username: "alice", password: "secretpw" });
+    });
+
+    it("promptCredentialsForAccount 密码留空/取消时返回 null 且不落存", async () => {
+      const ctx: any = makeContext();
+      __inputBoxQueue.push(undefined);
+      const res = await promptCredentialsForAccount(ctx, "https://h", "alice");
+      expect(res).toBeNull();
+      expect(ctx.secrets.store).not.toHaveBeenCalled();
+      expect(await getCredentialsForAccount(ctx, "https://h:alice")).toBeNull();
+    });
+  });
+
+  describe("creds (按账号)", () => {
+    it("save/get/clear 按账号 key 隔离", async () => {
+      const ctx: any = makeContext();
+      const key = "https://h:alice";
+      await saveCredentialsForAccount(ctx, key, "alice", "pw");
+      const got = await getCredentialsForAccount(ctx, key);
+      expect(got).toEqual({ username: "alice", password: "pw" });
+      // 另一个账号读不到
+      expect(await getCredentialsForAccount(ctx, "https://h:bob")).toBeNull();
+      await clearCredentialsForAccount(ctx, key);
+      expect(await getCredentialsForAccount(ctx, key)).toBeNull();
     });
   });
 });

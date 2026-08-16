@@ -76,6 +76,25 @@ export const Disposable = class Disposable {
   dispose(): void {}
 };
 
+/** TreeItem 的三种折叠状态枚举（与 vscode 真实取值一致：0/1/2）。 */
+export const TreeItemCollapsibleState = { None: 0, Collapsed: 1, Expanded: 2 };
+
+/**
+ * TreeItem 最小实现：仅满足树节点的构造/字段写入，
+ * description/contextValue/id 等字段为可写属性，便于测试断言。
+ */
+export const TreeItem = class TreeItem {
+  label: string;
+  collapsibleState: number;
+  description?: string;
+  contextValue?: string;
+  id?: string;
+  constructor(label: string, collapsibleState: number) {
+    this.label = label;
+    this.collapsibleState = collapsibleState;
+  }
+};
+
 export const EventEmitter = class EventEmitter<T = unknown> {
   event = (_listener: (e: T) => unknown, _thisArgs?: unknown, _disposables?: unknown) => new Disposable();
   fire(_data?: T): void {}

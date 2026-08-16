@@ -33,8 +33,49 @@
       {
         "command": "lkm.push",
         "title": "LKM: Push"
+      },
+      {
+        "command": "lkm.addAccount",
+        "title": "LKM: Add Account"
+      },
+      {
+        "command": "lkm.switchAccount",
+        "title": "LKM: Switch Account"
+      },
+      {
+        "command": "lkm.removeAccount",
+        "title": "LKM: Remove Account"
+      },
+      {
+        "command": "lkm.createSeries",
+        "title": "LKM: Create Series"
+      },
+      {
+        "command": "lkm.deleteSeries",
+        "title": "LKM: Delete Series"
+      },
+      {
+        "command": "lkm.toggleStar",
+        "title": "LKM: Toggle Star"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "lkm-series",
+          "title": "LKM Series",
+          "icon": "resources/lkm.svg"
+        }
+      ]
+    },
+    "views": {
+      "lkm-series": [
+        {
+          "id": "lkm.seriesTree",
+          "name": "LKM Series"
+        }
+      ]
+    },
     "configuration": {
       "title": "LKM",
       "properties": {
@@ -42,6 +83,22 @@
           "type": "string",
           "default": "",
           "description": "LKM 后端地址，如 https://lkm.s12mc.xyz"
+        },
+        "lkm.sync.pullIntervalMinutes": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "description": "自动同步定时拉取的间隔分钟数。"
+        },
+        "lkm.sync.pullOnFocus": {
+          "type": "boolean",
+          "default": true,
+          "description": "窗口获得焦点时是否自动拉取。"
+        },
+        "lkm.autoPush.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "打开自动保存推送（add -A + commit + push）。默认关闭，且新增改动尚未实现 commit 能力。"
         }
       }
     }
@@ -56,7 +113,6 @@
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
     "typescript": "^5.4.0",
-    "vitest": "^1.6.0",
-    "vscode": "^1.1.37"
+    "vitest": "^1.6.0"
   }
 }

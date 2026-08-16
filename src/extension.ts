@@ -1,7 +1,23 @@
 import * as vscode from "vscode";
-import { getActiveGitRepository } from "./git";
-import { runCloneFlow, CloneDeps } from "./clone";
-import { BlogSeries } from "./api";
+import {
+  AccountMeta,
+  listAccounts,
+  addAccount,
+  removeAccount,
+  findAccount,
+  accountKey,
+} from "./accounts";
+import {
+  getCredentialsForAccount,
+  clearCredentialsForAccount,
+  promptCredentialsForAccount,
+} from "./creds";
+import { createSeries } from "./api";
+import { createTokenManager, TokenManager } from "./auth";
+import { CloneDeps, runCloneForAccount } from "./clone";
+import { getActiveGitRepository, getGitByDir } from "./git";
+import { SeriesTreeProvider } from "./tree";
+import { SyncSettings, shouldPullNow, pathBelongsToAccount, collectPullTargets } from "./sync";
 
 /** 克隆博客系列命令 id。 */
 export const CLONE_CMD = "lkm.cloneBlog";
@@ -9,14 +25,53 @@ export const CLONE_CMD = "lkm.cloneBlog";
 export const PULL_CMD = "lkm.pull";
 /** 推送当前仓库命令 id。 */
 export const PUSH_CMD = "lkm.push";
+/** 新增账号命令 id。 */
+export const ADD_ACCOUNT_CMD = "lkm.addAccount";
+/** 切换账号命令 id。 */
+export const SWITCH_ACCOUNT_CMD = "lkm.switchAccount";
+/** 删除账号命令 id。 */
+export const REMOVE_ACCOUNT_CMD = "lkm.removeAccount";
+/** 创建系列命令 id。 */
+export const CREATE_SERIES_CMD = "lkm.createSeries";
+/** 删除系列命令 id。 */
+export const DELETE_SERIES_CMD = "lkm.deleteSeries";
+/** 星标系列命令 id。 */
+export const TOGGLE_STAR_CMD = "lkm.toggleStar";
+/** 系列树视图 id（registerTreeDataProvider 用）。 */
+export const MANAGE_SERIES_VIEW = "lkm.seriesTree";
 
 /** vscode.commands.registerCommand 的类型，便于测试注入真假实现。 */
 type RegisterFn = typeof vscode.commands.registerCommand;
 
 /**
- * 注入并注册三个 LKM 命令。
+ * 读 LKM 配置段的值。键形如 "lkm.serverUrl"，
+ * 剥掉 "lkm." 前缀后落到配置段的同名键。
+ */
+function getConfig<T>(key: string, dflt: T): T {
+  const section = "lkm";
+  const inner = key.slice(section.length + 1);
+  return vscode.workspace.getConfiguration(section).get<T>(inner, dflt);
+}
+
+/** 从 globalState 读出账号列表。 */
+function loadAccounts(context: vscode.ExtensionContext): AccountMeta[] {
+  const saved = (context.globalState.get("lkm.accounts") as AccountMeta[] | undefined) ?? [];
+  return listAccounts(saved);
+}
+
+/** 把账号列表持久化到 globalState。 */
+function saveAccounts(context: vscode.ExtensionContext, accounts: AccountMeta[]): void {
+  void context.globalState.update("lkm.accounts", accounts);
+}
+
+/**
+ * 注册全部 LKM 命令（v0.1 三命令 + 本版新增账号/系列命令），
+ * 并返回 SeriesTreeProvider 供 activate 注册到树视图。
  *
- * @param context VS Code 扩展上下文（挂到 subscriptions）
+ * 命令处理器共享闭包内的账号状态：accounts（列表）、currentKey/current（当前账号）。
+ * register 注入以便测试；_ 为预留参数。
+ *
+ * @param context VS Code 扩展上下文（挂 subscriptions / 读写 globalState）
  * @param register 命令注册函数（测试可注入 spy）
  * @param _ 预留参数（当前未使用）
  */
@@ -24,17 +79,178 @@ export function registerCommands(
   context: vscode.ExtensionContext,
   register: RegisterFn,
   _: never[]
-): void {
-  // 处理 LKM: Clone Blog：构造真实 UI deps 后走 runCloneFlow。
-  async function handleClone(commandContext: vscode.ExtensionContext) {
+): SeriesTreeProvider {
+  // 账号状态（本实现里命令处理器共享闭包状态）。
+  let accounts = loadAccounts(context);
+  let currentKey = (context.globalState.get("lkm.currentAccount") as string | null) ?? null;
+  let current = currentKey ? findAccount(accounts, currentKey) ?? null : null;
+
+  // 按账号 key 缓存的 TokenManager：复用 token 规避登录限流（spec §4）。
+  // 账号被移除时清掉对应条目，避免残留。
+  const tokenManagers = new Map<string, TokenManager>();
+
+  const provider = new SeriesTreeProvider(current);
+  // 树 provider 由 activate 注册，此处不重复做。
+
+  function setCurrent(account: AccountMeta | null): void {
+    current = account;
+    provider.setAccount(account);
+  }
+
+  /** 确保有当前账号，否则让用户先选择；返回当前账号或 null。 */
+  async function ensureCurrent(): Promise<AccountMeta | null> {
+    if (current) return current;
+    await _pickAccount();
+    return current;
+  }
+
+  async function _pickAccount(): Promise<void> {
+    if (accounts.length === 0) {
+      vscode.window.showWarningMessage("请先 LKM: Add Account 添加账号");
+      return;
+    }
+    const picked = await vscode.window.showQuickPick(
+      accounts.map((a) => ({ label: a.username, description: a.serverUrl, key: a.key })),
+      { placeHolder: "选择账号" }
+    );
+    if (picked) {
+      currentKey = picked.key;
+      const found = findAccount(accounts, picked.key) ?? null;
+      setCurrent(found);
+      void context.globalState.update("lkm.currentAccount", currentKey);
+    }
+  }
+
+  /**
+   * 判断一个错误是否为「认证失败（401）」的可靠信号。
+   *
+   * api.ts / auth.ts 对 HTTP 状态码抛 `HTTP ${res.status}`（401）或业务 msg；
+   * 故匹配解析出的状态码（若可用）与字符串 "401"/"Unauthorized"。宽松的中文业务
+   * 文案不作为判据，避免网络/业务错误被误判为认证失败而过度刷 token / 清凭证。
+   * 非 Error 拒绝（如字符串）先归一，避免 .includes 在 undefined 上抛错。
+   */
+  function isAuthError(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err);
+    const status =
+      err instanceof Error && "status" in err ? (err as { status: unknown }).status : undefined;
+    return (typeof status === "number" && status === 401) || msg.includes("401") || msg.includes("Unauthorized");
+  }
+
+  /** 401 时令该账号缓存 token 失效（spec §4），使下一次操作重新兑换。 */
+  function onAuthError(accountKey: string, err: unknown): void {
+    if (isAuthError(err)) {
+      tokenManagers.get(accountKey)?.invalidate();
+    }
+  }
+
+  /**
+   * 取当前账号可用的 Bearer token，并在认证失败时升级为「清凭证 + 重新引导输入」。
+   *
+   * spec §4/§10 要求：一次 401 只在缓存层自动重兑一次；若重兑（重新登录）仍被拒，
+   * 不能持续向限流的 /auth/login/password 硬撞。因此这里在 token 层做收敛：
+   *   1) 先用现有凭证取 token（内部会做一次 15 分钟过期重兑）；
+   *   2) 取不到（无凭证）或抛出认证失败 → 清除该账号旧凭证，提示用户重新录入；
+   *   3) 用户取消则返回 null；否则用新凭证重建 TokenManager 重试一次；
+   *   4) 重试仍失败（如新凭证也被拒）→ 返回 null，不再继续。
+   * 非认证失败（网络等）不判断为需要清凭证，直接返回 null 交由调用方提示。
+   */
+  async function ensureAuthedToken(account: AccountMeta): Promise<string | null> {
+    let mgr = tokenManagers.get(account.key);
+    if (!mgr) {
+      mgr = createTokenManager({
+        serverUrl: account.serverUrl,
+        getCredentials: () => getCredentialsForAccount(context, account.key),
+      });
+      tokenManagers.set(account.key, mgr);
+    }
+
+    // 首次尝试：用现有（可能缓存可能过期的）凭证取 token。
+    let authFailed = false;
+    try {
+      const tok = await mgr.getToken();
+      if (tok) return tok;
+      authFailed = true; // 无凭证可换 → 需要补录
+    } catch (err) {
+      onAuthError(account.key, err);
+      if (!isAuthError(err)) return null; // 网络等非认证失败，不升级处理。
+      authFailed = true;
+    }
+    if (!authFailed) return null;
+
+    // 认证失败或凭证缺失：清除旧凭证并引导重新录入。
+    await clearCredentialsForAccount(context, account.key);
+    const creds = await promptCredentialsForAccount(context, account.serverUrl, account.username);
+    if (!creds) return null; // 用户取消。
+    void vscode.window.showInformationMessage("登录凭证已失效，请重新输入密码后再试");
+
+    // 用新凭证重建 TokenManager 并重试一次；仍失败则放弃。
+    tokenManagers.delete(account.key);
+    mgr = createTokenManager({
+      serverUrl: account.serverUrl,
+      getCredentials: () => Promise.resolve(creds),
+    });
+    tokenManagers.set(account.key, mgr);
+    try {
+      return await mgr.getToken();
+    } catch {
+      return null;
+    }
+  }
+
+  // ---- LKM: Add Account ----
+  async function handleAddAccount() {
+    const serverUrl = (
+      await vscode.window.showInputBox({ prompt: "LKM 后端地址", value: getConfig("serverUrl", ""), ignoreFocusOut: true })
+    )?.trim();
+    if (!serverUrl) return;
+    const username = (
+      await vscode.window.showInputBox({ prompt: "LKM 用户名", ignoreFocusOut: true })
+    )?.trim();
+    if (!username) return;
+    const creds = await promptCredentialsForAccount(context, serverUrl, username);
+    if (!creds) return;
+    accounts = addAccount(accounts, serverUrl, username);
+    saveAccounts(context, accounts);
+    const key = accountKey(serverUrl, username);
+    currentKey = findAccount(accounts, key)?.key ?? null;
+    setCurrent(currentKey ? findAccount(accounts, currentKey) ?? null : null);
+    void context.globalState.update("lkm.currentAccount", currentKey);
+    vscode.window.showInformationMessage(`已添加账号 ${username}`);
+  }
+
+  // ---- LKM: Switch Account ----
+  async function handleSwitchAccount() {
+    await _pickAccount();
+  }
+
+  // ---- LKM: Remove Account ----
+  async function handleRemoveAccount() {
+    const acc = await ensureCurrent();
+    if (!acc) return;
+    const ok = await vscode.window.showWarningMessage(
+      `删除账号 ${acc.username}？将移除其凭证与系列映射。`,
+      { modal: true },
+      "删除"
+    );
+    if (ok !== "删除") return;
+    await clearCredentialsForAccount(context, acc.key);
+    tokenManagers.delete(acc.key);
+    accounts = removeAccount(accounts, acc.key);
+    saveAccounts(context, accounts);
+    if (currentKey === acc.key) {
+      currentKey = accounts.length ? accounts[0].key : null;
+      setCurrent(currentKey ? findAccount(accounts, currentKey) ?? null : null);
+      void context.globalState.update("lkm.currentAccount", currentKey);
+    }
+  }
+
+  // ---- LKM: Clone Blog（归入当前账号）----
+  async function handleClone() {
+    const acc = await ensureCurrent();
+    if (!acc) return;
     const deps: CloneDeps = {
-      // lkm.serverUrl 落在 lkm 配置段；getConfiguration("lkm") 会去掉 "lkm." 前缀，
-      // 故此处把 "lkm.serverUrl" 键翻译成段内 "serverUrl"。
-      getConfig: (k) =>
-        k === "lkm.serverUrl"
-          ? vscode.workspace.getConfiguration("lkm").get<string>("serverUrl")
-          : undefined,
-      pickSeries: async (series: BlogSeries[]) => {
+      getConfig: (k) => getConfig(k, ""),
+      pickSeries: async (series) => {
         const picked = await vscode.window.showQuickPick(
           series.map((s) => ({ label: s.title, detail: s.repo_name, series: s })),
           { placeHolder: "选择要克隆的 blog 系列" }
@@ -55,16 +271,27 @@ export function registerCommands(
         const { cloneRepository } = await import("./git");
         await cloneRepository(url, dir);
       },
+      afterCloneHint: async (dir) => {
+        void vscode.window.showInformationMessage(
+          `已克隆。如需可删除 ${dir}/.git/config 中的明文远程口令，或用 git credential helper。`
+        );
+      },
     };
-    const outcome = await runCloneFlow(commandContext, deps);
+    const outcome = await runCloneForAccount(context, acc, deps);
     if (outcome.kind === "cloned") {
+      // 写回映射
+      const idx = accounts.findIndex((a) => a.key === outcome.account.key);
+      if (idx >= 0) accounts = accounts.map((a) => (a.key === outcome.account.key ? outcome.account : a));
+      else accounts = [...accounts, outcome.account];
+      saveAccounts(context, accounts);
+      if (current && current.key === outcome.account.key) setCurrent(outcome.account);
       vscode.window.showInformationMessage(outcome.message);
     } else if (outcome.kind === "error") {
       vscode.window.showErrorMessage(outcome.message);
     }
   }
 
-  // 处理 LKM: Pull：拉取当前活动仓库。
+  // ---- LKM: Pull / Push（工作区便捷）----
   async function handlePull() {
     const repo = await getActiveGitRepository();
     if (!repo) {
@@ -77,8 +304,6 @@ export function registerCommands(
       vscode.window.showErrorMessage(`拉取失败：${(err as Error).message}`);
     }
   }
-
-  // 处理 LKM: Push：推送当前活动仓库。
   async function handlePush() {
     const repo = await getActiveGitRepository();
     if (!repo) {
@@ -92,14 +317,169 @@ export function registerCommands(
     }
   }
 
-  context.subscriptions.push(register(CLONE_CMD, () => handleClone(context)));
-  context.subscriptions.push(register(PULL_CMD, handlePull));
-  context.subscriptions.push(register(PUSH_CMD, handlePush));
+  // ---- Series CRUD（Bearer）----
+  async function handleCreateSeries() {
+    const acc = await ensureCurrent();
+    if (!acc) return;
+    const title = (await vscode.window.showInputBox({ prompt: "系列标题", ignoreFocusOut: true }))?.trim();
+    if (!title) return;
+    const repoName = (
+      await vscode.window.showInputBox({ prompt: "repo_name（如 my-blog）", ignoreFocusOut: true })
+    )?.trim();
+    if (!repoName) return;
+    // 取 token，认证失败会升级为清凭证+重录（spec §4/§10）。
+    const tok = await ensureAuthedToken(acc);
+    if (!tok) return;
+    try {
+      const s = await createSeries(acc.serverUrl, tok, { title, repo_name: repoName });
+      vscode.window.showInformationMessage(`已创建系列 ${s.title}`);
+    } catch (err) {
+      // API 仍 401（新凭证也可能被拒）：令缓存失效，下次操作再走 ensureAuthedToken 的清凭证升级。
+      onAuthError(acc.key, err);
+      vscode.window.showErrorMessage(`创建失败：${(err as Error).message}`);
+    }
+  }
+
+  async function handleDeleteSeries() {
+    const acc = await ensureCurrent();
+    if (!acc) return;
+    const entries = Object.entries(acc.series);
+    if (entries.length === 0) {
+      vscode.window.showWarningMessage("当前账号没有已映射系列");
+      return;
+    }
+    const picked = await vscode.window.showQuickPick(
+      entries.map(([repo]) => ({ label: repo, repo })),
+      { placeHolder: "选择要删除的系列" }
+    );
+    if (!picked) return;
+    // 真实删除需要后端 series id，而当前映射以 repo_name 存储、未接真实 id。
+    // 为不发起欺骗性 API 调用，本版仅提示，真实接线留作后续版本。
+    vscode.window.showWarningMessage("系列删除尚未接入真实 series id，后续版本完成");
+  }
+
+  // 星标同样依赖真实 series id，尚未接线；保留命令入口但仅提示。
+  async function handleToggleStar() {
+    const acc = await ensureCurrent();
+    if (!acc) return;
+    vscode.window.showWarningMessage("星标尚未接入真实 series id，后续版本完成");
+  }
+
+  const subs = context.subscriptions;
+  subs.push(register(CLONE_CMD, handleClone));
+  subs.push(register(PULL_CMD, handlePull));
+  subs.push(register(PUSH_CMD, handlePush));
+  subs.push(register(ADD_ACCOUNT_CMD, handleAddAccount));
+  subs.push(register(SWITCH_ACCOUNT_CMD, handleSwitchAccount));
+  subs.push(register(REMOVE_ACCOUNT_CMD, handleRemoveAccount));
+  subs.push(register(CREATE_SERIES_CMD, handleCreateSeries));
+  subs.push(register(DELETE_SERIES_CMD, handleDeleteSeries));
+  subs.push(register(TOGGLE_STAR_CMD, handleToggleStar));
+
+  // 树 provider 交给 activate 注册到视图。
+  return provider;
 }
 
-/** 扩展激活入口：以真实实现注册命令。 */
+/**
+ * 从 globalState 读当前账号（自动同步用，与命令闭包独立）。
+ * 无账号或列表为空时返回 null。
+ */
+function getCurrentAccountFromState(context: vscode.ExtensionContext): AccountMeta | null {
+  const accounts = loadAccounts(context);
+  const currentKey = (context.globalState.get("lkm.currentAccount") as string | null) ?? null;
+  return currentKey ? findAccount(accounts, currentKey) ?? null : null;
+}
+
+/**
+ * 启动自动同步副作用：定时轮询 pull + 聚焦 pull + 保存 auto-push 决策。
+ *
+ * - 定时器周期在启动时按配置算一次；每次 tick 再按最新配置决定是否 pull。
+ * - pull 只读，失败静默（badge 由 tree provider 展示）。
+ * - auto-push 默认关（lkm.autoPush.enabled）；开启时仅触发 gitRemoting 占位。
+ * 返回 Disposable，在 activate 的 subscriptions 中注入以便停用时清理。
+ */
+function startAutoSync(
+  _context: vscode.ExtensionContext,
+  getCurrentAccount: () => AccountMeta | null
+): vscode.Disposable {
+  const settings = (): SyncSettings => ({
+    pullIntervalMinutes: getConfig("sync.pullIntervalMinutes", 5),
+    pullOnFocus: getConfig("sync.pullOnFocus", true),
+    autoPushEnabled: getConfig("autoPush.enabled", false),
+  });
+  let lastRunByDir = new Map<string, number>();
+
+  async function pullOne(dir: string): Promise<void> {
+    const git = await getGitByDir(dir);
+    if (!git) return;
+    try {
+      await git.pull();
+      lastRunByDir.set(dir, Date.now());
+    } catch {
+      /* 静默，badge 由 provider 展示 */
+    }
+  }
+  async function pullAll(): Promise<void> {
+    const acc = getCurrentAccount();
+    if (!acc) return;
+    const cfg = settings();
+    for (const dir of collectPullTargets(acc)) {
+      if (shouldPullNow(lastRunByDir.get(dir) ?? null, cfg.pullIntervalMinutes, Date.now())) {
+        await pullOne(dir);
+      }
+    }
+  }
+
+  const timer = setInterval(
+    () => {
+      void pullAll();
+    },
+    Math.max(getConfig("sync.pullIntervalMinutes", 5), 1) * 60 * 1000
+  );
+
+  const onFocus = vscode.window.onDidChangeWindowState((e) => {
+    if (e.focused && settings().pullOnFocus) void pullAll();
+  });
+
+  const onSave = vscode.workspace.onDidSaveTextDocument((doc) => {
+    const cfg = settings();
+    if (!cfg.autoPushEnabled) return;
+    const acc = getCurrentAccount();
+    if (!acc || !doc.fileName) return;
+    const dir = pathBelongsToAccount(doc.fileName, acc);
+    if (!dir) return;
+    void getGitByDir(dir).then((git) => git && void gitRemoting(git, cfg));
+  });
+
+  return new vscode.Disposable(() => {
+    clearInterval(timer);
+    onFocus.dispose();
+    onSave.dispose();
+  });
+}
+
+/**
+ * auto-push：add -A + commit + push。
+ *
+ * 占位：GitRepositoryHandle 只有 pull/push，缺少 add/commit 能力。
+ * 实际 auto-commit+push 需要 git.ts 扩展 commitAndPush（add -A + commit "lkm: auto-sync" + push），
+ * 属明确后续项，本版不假实现。该函数仅在 autoPush 开启（默认关）时才会被调用。
+ */
+async function gitRemoting(_git: { pull(): Promise<void>; push(): Promise<void> }, _cfg: SyncSettings): Promise<void> {
+  // 占位：git.ts 需扩展 commitAndPush（add -A + commit "lkm: auto-sync" + push）在此接线。
+}
+
+/** 扩展激活入口：以真实实现注册命令与树视图，并启动自动同步。 */
 export function activate(context: vscode.ExtensionContext): void {
-  registerCommands(context, vscode.commands.registerCommand.bind(vscode.commands), []);
+  // 账号持久化交给 registerCommands 内部闭包；此处注册 provider 与命令。
+  const provider = registerCommands(context, vscode.commands.registerCommand.bind(vscode.commands), []);
+  context.subscriptions.push(
+    vscode.window.registerTreeDataProvider(MANAGE_SERIES_VIEW, provider as never)
+  );
+  // 注册自动同步副作用，随停用一起清理。
+  context.subscriptions.push(
+    startAutoSync(context, () => getCurrentAccountFromState(context))
+  );
 }
 
 /** 扩展停用入口：无需清理。 */

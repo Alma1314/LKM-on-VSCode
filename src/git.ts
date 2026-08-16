@@ -99,3 +99,26 @@ async function pickRepository(api: unknown): Promise<GitRepositoryHandle | null>
   if (!picked) return null;
   return wrapRepository(picked.repo);
 }
+
+/** 把路径归一化为小写正斜杠，便于跨平台路径匹配（Windows 反斜杠 vs 正斜杠）。 */
+function normFs(p: string): string {
+  return p.replace(/\\/g, "/").toLowerCase();
+}
+
+/** 按目录解析 GitExtension 仓库对象，包装成 {pull, push}。 */
+export async function getGitByDir(dir: string): Promise<GitRepositoryHandle | null> {
+  try {
+    const ext = vscode.extensions.getExtension("vscode.git");
+    if (!ext) return null;
+    const api = await ext.activate();
+    const repos = (api as { repositories?: unknown[] }).repositories ?? [];
+    const target = normFs(dir);
+    for (const r of repos) {
+      const root = (r as { rootUri?: { fsPath?: string } }).rootUri?.fsPath;
+      if (root && normFs(root) === target) return wrapRepository(r);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}

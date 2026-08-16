@@ -5,10 +5,37 @@
 ## 安装
 `pnpm install && pnpm run compile && pnpm run package`，在 VS Code 扩展面板安装生成的 `lkm-on-vscode-0.0.1.vsix`。
 
+## 多账号
+支持管理多个 LKM 账号，每个账号独立缓存凭证与系列映射：
+- `LKM: Add Account`：添加账号（输入后端地址与用户名密码，密码存入 SecretStorage）。
+- `LKM: Switch Account`：切换当前账号。
+- `LKM: Remove Account`：删除账号并清除其凭证与系列映射。
+
+## 管理面板（TreeView）
+侧栏 Activity Bar 新增 **LKM Series** 面板，展示当前账号克隆到本地的系列，支持后续在面板内 CRUD。
+
 ## 使用
 1. 设置 `lkm.serverUrl`（LKM 后端地址）。
-2. 执行命令 `LKM: Clone Blog`，输入用户名密码，选择系列与本地目录。
+2. `LKM: Add Account` 后 `LKM: Clone Blog`，选择系列与本地目录。
 3. 编辑后 `LKM: Push` 推送；收到远端改动用 `LKM: Pull` 拉取。
 
+## 系列 CRUD
+- 创建系列：`LKM: Create Series`（Bearer 认证，成功后映射到当前账号）。
+- 删除系列：`LKM: Delete Series` —— **已知限制**：当前以 repo_name 存储映射、未接入真实后端 series id，命令仅提示不发起真实删除，后续版本完成。
+- 星标：`LKM: Toggle Star` —— **已知限制**：同样依赖真实 series id 接线，命令仅提示。
+
+## 自动同步
+默认**只读**：按账号映射目录执行 pull（定时轮询 + 窗口聚焦时触发），失败静默时不打断编辑。
+
+- 定时拉取：`lkm.sync.pullIntervalMinutes`（默认 5 分钟）。
+- 聚焦拉取：`lkm.sync.pullOnFocus`（默认 true）。
+- 自动保存推送：`lkm.autoPush.enabled`（默认 **false**）。开启后会在保存时触发 auto-push 决策，但 **auto-commit+push 尚未实现**（git.ts 需扩展 add/commit 能力的 `commitAndPush`），属明确后续项。
+
+**已知限制（自动 pull 仅对已打开仓库生效）**：定时/聚焦 pull 通过 GitExtension 按目录解析仓库，只认**当前已在该 VS Code 工作区打开/加载**的仓库。被映射到某目录、但当前未打开的仓库**不会**被自动拉取（静默跳过，属预期行为）。如需同步此类未打开目录，请显式 `LKM: Pull` 或将该目录加入工作区后等待下一次自动拉取。
+
+## 配置
+- `lkm.serverUrl`：LKM 后端地址，如 `https://lkm.s12mc.xyz`。
+- `lkm.sync.pullIntervalMinutes` / `lkm.sync.pullOnFocus` / `lkm.autoPush.enabled`：自动同步参数（见上）。
+
 ## 凭证
-用户名与密码存入 VS Code 安全存储（SecretStorage），clone 时内联于 git URL，首次推送可能提示保存 git 凭证。
+用户名与密码存入 VS Code 安全存储（SecretStorage），clone 时内联于 git URL，首次推送可能提示保存 git 凭证。每次操作复用缓存的 Bearer token；遇 401 会自动使缓存失效并在下次操作重新登录兑换（规避登录限流）。

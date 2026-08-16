@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" aria-hidden="true">
+  <!-- 圆角方形书签/书本底框 -->
+  <rect x="3.5" y="4" width="17" height="17" rx="3" fill="none" stroke="currentColor" stroke-width="1.6"/>
+  <!-- 书本中缝分隔线 -->
+  <line x1="12" y1="4" x2="12" y2="21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+  <!-- 左页三条 "L" 行（book 内容） -->
+  <line x1="6.2" y1="8" x2="10" y2="8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="6.2" y1="11.5" x2="10" y2="11.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="6.2" y1="15" x2="8.6" y2="15" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  <!-- 右页两条行 -->
+  <line x1="14" y1="8" x2="17.8" y2="8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="14" y1="11.5" x2="17.8" y2="11.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+</svg>
