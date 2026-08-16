@@ -1,0 +1,7 @@
+# pnpm 工作区配置。
+# 授权 esbuild 安装平台二进制，否则 vitest 依赖的 esbuild 无法运行。
+onlyBuiltDependencies:
+  - esbuild
+
+allowBuilds:
+  esbuild: true

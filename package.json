@@ -1,0 +1,62 @@
+{
+  "name": "lkm-on-vscode",
+  "displayName": "LKM Blog on VS Code",
+  "description": "把 LKM 平台的 blog 系列用 Git 克隆到本地编辑与推送",
+  "version": "0.0.1",
+  "publisher": "lkm",
+  "license": "GPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/example/lkm-on-vscode.git"
+  },
+  "author": "LKM",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "lkm.cloneBlog",
+        "title": "LKM: Clone Blog"
+      },
+      {
+        "command": "lkm.pull",
+        "title": "LKM: Pull"
+      },
+      {
+        "command": "lkm.push",
+        "title": "LKM: Push"
+      }
+    ],
+    "configuration": {
+      "title": "LKM",
+      "properties": {
+        "lkm.serverUrl": {
+          "type": "string",
+          "default": "",
+          "description": "LKM 后端地址，如 https://lkm.s12mc.xyz"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "vitest run",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0",
+    "vscode": "^1.1.37"
+  }
+}
